@@ -144,8 +144,11 @@ class PurchaseInvoice {
       }
     }
     
+    final documentId = (map['id'] as String?) ?? '';
+    final fallbackId = documentId.isNotEmpty ? documentId : '';
+
     return PurchaseInvoice(
-      id: (map['id'] as String?) ?? '',
+      id: fallbackId,
       customerId: (map['customerId'] as String?) ?? '',
       customerName: (map['customerName'] as String?) ?? '',
       customerVatNumber: (map['customerVatNumber'] as String?) ?? '',
@@ -155,8 +158,8 @@ class PurchaseInvoice {
       invoiceDate: parseDate(map['invoiceDate']),
       items: items,
       createdAt: parseDate(map['createdAt']),
-      periodSectionName: map['periodSectionName'] as String,
-      periodSectionId: map['periodSectionId'] as String,
+      periodSectionName: (map['periodSectionName'] as String?) ?? '',
+      periodSectionId: (map['periodSectionId'] as String?) ?? '',
     );
   }
 }

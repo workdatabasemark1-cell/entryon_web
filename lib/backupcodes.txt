@@ -1,0 +1,2360 @@
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:lucide_icons/lucide_icons.dart';
+import 'package:provider/provider.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../providers/customer_provider.dart';
+import '../models/customer_model.dart';
+
+
+// ── Lightweight period model (used only inside this screen) ──────────────────
+class _Period {
+  final String id;
+  final String name;
+  final DateTime startDate;
+  final DateTime endDate;
+
+  _Period({
+    required this.id,
+    required this.name,
+    required this.startDate,
+    required this.endDate,
+  });
+   String get range =>
+      '${DateFormat('MMM yyyy').format(startDate)} – '
+      '${DateFormat('MMM yyyy').format(endDate)}';
+}
+
+// ── Device activation for one software ────────────────────────────────────
+class _DeviceActivation {
+  final TextEditingController deviceLabelController;
+  final TextEditingController userController;
+  final TextEditingController keyController;
+  DateTime? activationDate;
+  DateTime? expiryDate;
+
+  _DeviceActivation({
+    String deviceLabel = '',
+    String userId = '',
+    String key = '',
+    this.activationDate,
+    this.expiryDate,
+  })  : deviceLabelController = TextEditingController(text: deviceLabel),
+        userController = TextEditingController(text: userId),
+        keyController = TextEditingController(text: key);
+
+  void dispose() {
+    deviceLabelController.dispose();
+    userController.dispose();
+    keyController.dispose();
+  }
+}
+
+// ── Local branch staff member for UI state management ─────────────────────
+class _BranchStaff {
+  final TextEditingController nameController;
+  final TextEditingController phoneController;
+
+  _BranchStaff({String name = '', String phone = ''})
+      : nameController = TextEditingController(text: name),
+        phoneController = TextEditingController(text: phone);
+
+  void dispose() {
+    nameController.dispose();
+    phoneController.dispose();
+  }
+}
+
+// ── Local branch for UI state management ──────────────────────────────────
+class _BranchData {
+  final TextEditingController nameController;
+  final TextEditingController phoneController;
+  final TextEditingController addressController;
+  final List<_BranchStaff> staffList;
+
+  _BranchData({
+    String name = '',
+    String phone = '',
+    String address = '',
+    List<_BranchStaff>? staffList,
+  })  : nameController = TextEditingController(text: name),
+        phoneController = TextEditingController(text: phone),
+        addressController = TextEditingController(text: address),
+        staffList = staffList ?? [];
+
+  void dispose() {
+    nameController.dispose();
+    phoneController.dispose();
+    addressController.dispose();
+    for (final staff in staffList) {
+      staff.dispose();
+    }
+  }
+
+  Branch toModel() {
+    return Branch(
+      name: nameController.text,
+      phone: phoneController.text,
+      address: addressController.text,
+      staff: staffList.map((s) => Staff(
+        name: s.nameController.text,
+        phone: s.phoneController.text,
+      )).toList(),
+    );
+  }
+}
+
+class CreateCustomerScreen extends StatefulWidget {
+
+  final Customer? customer;
+  final VoidCallback? onClose;
+
+  const CreateCustomerScreen({super.key, this.customer,this.onClose});
+
+  @override
+  State<CreateCustomerScreen> createState() => _CreateCustomerScreenState();
+}
+
+class _CreateCustomerScreenState extends State<CreateCustomerScreen> {
+  final _formKey = GlobalKey<FormState>();
+
+  // Basic Information
+  late TextEditingController _nameController;
+  late TextEditingController _phoneController;
+  late TextEditingController _phone2Controller;
+  late TextEditingController _emailController;
+  
+  // Organization Details
+  late TextEditingController _organizationNameController;
+  late TextEditingController _organizationUnitNameController;
+  late TextEditingController _commonNameController;
+  late TextEditingController _businessCategoryController;
+  
+  // Address Information
+  late TextEditingController _addressController;
+  late TextEditingController _registeredAddressController;
+  late TextEditingController _buildingNoController;
+  late TextEditingController _streetNameController;
+  late TextEditingController _districtNameController;
+  late TextEditingController _cityNameController;
+  late TextEditingController _zipCodeController;
+  late TextEditingController _additionalNoController;
+  late TextEditingController _unitNoController;
+  late TextEditingController _countryController;
+  
+  // Tax and Registration
+  late TextEditingController _taxNumberController;
+  late TextEditingController _crNumberController;
+  
+  // Zatca Credentials
+  late TextEditingController _zatcaUsernameController;
+  late TextEditingController _zatcaPasswordController;
+
+  bool _zatcaEnabled = false;
+  DateTime? _financialPeriodStartDate;
+  DateTime? _financialPeriodEndDate;
+
+  final List<String> _availableSoftwares = [
+    'Digisuite',
+    'Saleculator',
+    'BillBox',
+    'CaproErp'
+  ];
+
+  /// Which softwares are selected
+  final List<String> _selectedSoftwareNames = [];
+
+  /// software name → list of devices
+  final Map<String, List<_DeviceActivation>> _softwareDevices = {};
+
+  List<String> _expiredSoftwares = [];
+  bool _expiryAlertShown = false;
+
+  // ── Main customer staff management ──────────────────────────────────────
+  final List<_BranchStaff> _mainCustomerStaff = [];
+
+  // ── Branch and staff management ────────────────────────────────────────
+  final List<_BranchData> _branches = [];
+
+  // ── Branch software tracking ───────────────────────────────────────────
+  // Map of branch index → Map of software → List of devices
+  final Map<int, Map<String, List<_DeviceActivation>>> _branchSoftwareDevices = {};
+  // Map of branch index → List of selected software names
+  final Map<int, List<String>> _branchSelectedSoftwares = {};
+
+  // ── Period sections from Firestore ────────────────────────────────────────
+  List<_Period> _periods = [];
+  bool _periodsLoading = true;
+  _Period? _selectedPeriod;
+
+  bool get _isEditing => widget.customer != null;
+
+  @override
+  void initState() {
+    super.initState();
+    
+    // Initialize all controllers
+    _nameController = TextEditingController();
+    _phoneController = TextEditingController();
+    _phone2Controller = TextEditingController();
+    _emailController = TextEditingController();
+    _organizationNameController = TextEditingController();
+    _organizationUnitNameController = TextEditingController();
+    _commonNameController = TextEditingController();
+    _businessCategoryController = TextEditingController();
+    _addressController = TextEditingController();
+    _registeredAddressController = TextEditingController();
+    _buildingNoController = TextEditingController();
+    _streetNameController = TextEditingController();
+    _districtNameController = TextEditingController();
+    _cityNameController = TextEditingController();
+    _zipCodeController = TextEditingController();
+    _additionalNoController = TextEditingController();
+    _unitNoController = TextEditingController();
+    _countryController = TextEditingController();
+    _taxNumberController = TextEditingController();
+    _crNumberController = TextEditingController();
+    _zatcaUsernameController = TextEditingController();
+    _zatcaPasswordController = TextEditingController();
+    
+    _fetchPeriods();
+    
+    // Pre-fill form if editing
+    if (_isEditing) {
+      final customer = widget.customer!;
+      _nameController.text = customer.name;
+      _phoneController.text = customer.phone;
+      _phone2Controller.text = customer.phone2 ?? '';
+      _emailController.text = customer.email ?? '';
+      _organizationNameController.text = customer.organizationName ?? '';
+      _organizationUnitNameController.text = customer.organizationUnitName ?? '';
+      _commonNameController.text = customer.commonName ?? '';
+      _businessCategoryController.text = customer.businessCategory ?? '';
+      _addressController.text = customer.address;
+      _registeredAddressController.text = customer.registeredAddress ?? '';
+      _buildingNoController.text = customer.buildingNo ?? '';
+      _streetNameController.text = customer.streetName ?? '';
+      _districtNameController.text = customer.districtName ?? '';
+      _cityNameController.text = customer.cityName ?? '';
+      _zipCodeController.text = customer.zipCode ?? '';
+      _additionalNoController.text = customer.additionalNo ?? '';
+      _unitNoController.text = customer.unitNo ?? '';
+      _countryController.text = customer.country ?? '';
+      _taxNumberController.text = customer.taxNumber;
+      _crNumberController.text = customer.crNumber ?? '';
+      _zatcaUsernameController.text = customer.zatcaUsername ?? '';
+      _zatcaPasswordController.text = customer.zatcaPassword ?? '';
+      _zatcaEnabled = customer.zatcaEnabled?? false;
+      _financialPeriodStartDate = customer.financialPeriodStartDate != null
+          ? DateTime.tryParse(customer.financialPeriodStartDate!)
+          : null;
+      _financialPeriodEndDate = customer.financialPeriodEndDate != null
+          ? DateTime.tryParse(customer.financialPeriodEndDate!)
+          : null;
+
+      _selectedSoftwareNames
+        ..clear()
+        ..addAll(_getPrefilledSoftwareNames(customer));
+
+      // Group existing activations by software name
+      for (final software in _availableSoftwares) {
+        final entries = customer.softwareActivations
+            .where((e) => e['name'] == software)
+            .toList();
+
+        if (entries.isEmpty) continue;
+
+        _softwareDevices[software] = entries.map((entry) {
+          return _DeviceActivation(
+            deviceLabel: (entry['deviceLabel'] ?? entry['deviceType'] ?? '').toString(),
+            userId: (entry['activationUserId'] ?? '').toString(),
+            key: (entry['activationKey'] ?? '').toString(),
+            activationDate: _parseActivationDate(entry['activationDate']),
+            expiryDate: _parseActivationDate(entry['expiryDate']),
+          );
+        }).toList();
+      }
+
+      _checkExpiryAlerts();
+
+      // Load existing main customer staff
+      for (final s in customer.staff) {
+        _mainCustomerStaff.add(_BranchStaff(name: s.name, phone: s.phone));
+      }
+
+      // Load existing branches with their software
+      for (int branchIndex = 0; branchIndex < customer.branches.length; branchIndex++) {
+        final branch = customer.branches[branchIndex];
+        
+        final branchData = _BranchData(
+          name: branch.name,
+          phone: branch.phone,
+          address: branch.address,
+          staffList: branch.staff.map((s) => _BranchStaff(
+            name: s.name,
+            phone: s.phone,
+          )).toList(),
+        );
+        _branches.add(branchData);
+
+        // Initialize branch software tracking
+        _branchSelectedSoftwares[branchIndex] = [];
+        _branchSoftwareDevices[branchIndex] = {};
+
+        // Group branch software activations by software name
+        for (final software in _availableSoftwares) {
+          final entries = branch.softwareActivations
+              .where((e) => e['name'] == software)
+              .toList();
+
+          if (entries.isEmpty) continue;
+
+          _branchSelectedSoftwares[branchIndex]!.add(software);
+          _branchSoftwareDevices[branchIndex]![software] = entries.map((entry) {
+            return _DeviceActivation(
+              deviceLabel: (entry['deviceLabel'] ?? entry['deviceType'] ?? '').toString(),
+              userId: (entry['activationUserId'] ?? '').toString(),
+              key: (entry['activationKey'] ?? '').toString(),
+              activationDate: _parseActivationDate(entry['activationDate']),
+              expiryDate: _parseActivationDate(entry['expiryDate']),
+            );
+          }).toList();
+        }
+      }
+    }
+  }
+
+    void _checkExpiryAlerts() {
+      if (_expiryAlertShown) return;
+
+      final now = DateTime.now();
+      final expired = <String>[];
+
+      for (final software in _selectedSoftwareNames) {
+        final devices = _softwareDevices[software] ?? [];
+        final hasExpired = devices.any((d) =>
+            d.expiryDate != null && !d.expiryDate!.isAfter(now));
+        if (hasExpired) expired.add(software);
+      }
+
+      _expiredSoftwares = expired;
+
+      if (_expiredSoftwares.isNotEmpty && mounted) {
+        _expiryAlertShown = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final message = _expiredSoftwares.length == 1
+              ? '${_expiredSoftwares.first} has expired on one or more devices.'
+              : '${_expiredSoftwares.length} softwares have expired activations.';
+          showDialog(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Activation Expiry Alert'),
+              content: Text(message),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        });
+      }
+    }
+
+    DateTime? _parseActivationDate(dynamic value) {
+      if (value == null) return null;
+      if (value is DateTime) return value;
+      if (value is Timestamp) return value.toDate();
+      if (value is String) return DateTime.tryParse(value);
+      return null;
+    }
+
+    List<String> _getPrefilledSoftwareNames(Customer customer) {
+      if (customer.usedSoftwares.isNotEmpty) {
+        return customer.usedSoftwares
+            .where((s) => _availableSoftwares.contains(s))
+            .toList();
+      }
+      return customer.softwareActivations
+          .map((e) => e['name']?.toString())
+          .whereType<String>()
+          .where((n) => _availableSoftwares.contains(n))
+          .toSet()
+          .toList();
+    }
+
+    List<Map<String, dynamic>> _buildSoftwareActivations() {
+      final List<Map<String, dynamic>> result = [];
+
+      for (final software in _selectedSoftwareNames) {
+        final devices = _softwareDevices[software] ?? [];
+        for (final device in devices) {
+          result.add({
+            'name': software,
+            'deviceLabel': device.deviceLabelController.text.trim(),
+            'enabled': true,
+            'activationUserId': device.userController.text.trim(),
+            'activationKey': device.keyController.text.trim(),
+            'activationDate': device.activationDate,
+            'expiryDate': device.expiryDate,
+          });
+        }
+      }
+      return result;
+    }
+
+    List<Map<String, dynamic>> _buildBranchSoftwareActivations(int branchIndex) {
+      final List<Map<String, dynamic>> result = [];
+      final selectedSoftwares = _branchSelectedSoftwares[branchIndex] ?? [];
+      final softwareDevices = _branchSoftwareDevices[branchIndex] ?? {};
+
+      for (final software in selectedSoftwares) {
+        final devices = softwareDevices[software] ?? [];
+        for (final device in devices) {
+          result.add({
+            'name': software,
+            'deviceLabel': device.deviceLabelController.text.trim(),
+            'enabled': true,
+            'activationUserId': device.userController.text.trim(),
+            'activationKey': device.keyController.text.trim(),
+            'activationDate': device.activationDate,
+            'expiryDate': device.expiryDate,
+          });
+        }
+      }
+      return result;
+    }
+
+    void _toggleSoftwareSelection(String software, bool? value) {
+      setState(() {
+        if (value == true) {
+          if (!_selectedSoftwareNames.contains(software)) {
+            _selectedSoftwareNames.add(software);
+            // Start with one empty device
+            _softwareDevices[software] = [_DeviceActivation(deviceLabel: 'Device 1')];
+          }
+        } else {
+          _selectedSoftwareNames.remove(software);
+          // Dispose controllers
+          for (final d in _softwareDevices[software] ?? []) {
+            d.dispose();
+          }
+          _softwareDevices.remove(software);
+        }
+      });
+    }
+
+    void _addDevice(String software) {
+      setState(() {
+        _softwareDevices.putIfAbsent(software, () => []);
+        final count = (_softwareDevices[software]?.length ?? 0) + 1;
+        _softwareDevices[software]!.add(
+          _DeviceActivation(deviceLabel: 'Device $count'),
+        );
+      });
+    }
+
+    void _removeDevice(String software, int index) {
+      setState(() {
+        final list = _softwareDevices[software];
+        if (list == null || index >= list.length) return;
+        list[index].dispose();
+        list.removeAt(index);
+        // If no devices left, also unselect the software
+        if (list.isEmpty) {
+          _selectedSoftwareNames.remove(software);
+          _softwareDevices.remove(software);
+        }
+      });
+    }
+
+    void _toggleBranchSoftwareSelection(int branchIndex, String software, bool? value) {
+      setState(() {
+        _branchSelectedSoftwares.putIfAbsent(branchIndex, () => []);
+        _branchSoftwareDevices.putIfAbsent(branchIndex, () => {});
+
+        if (value == true) {
+          if (!_branchSelectedSoftwares[branchIndex]!.contains(software)) {
+            _branchSelectedSoftwares[branchIndex]!.add(software);
+            _branchSoftwareDevices[branchIndex]![software] = [
+              _DeviceActivation(deviceLabel: 'Device 1')
+            ];
+          }
+        } else {
+          _branchSelectedSoftwares[branchIndex]!.remove(software);
+          for (final d in _branchSoftwareDevices[branchIndex]![software] ?? []) {
+            d.dispose();
+          }
+          _branchSoftwareDevices[branchIndex]!.remove(software);
+        }
+      });
+    }
+
+    void _addBranchDevice(int branchIndex, String software) {
+      setState(() {
+        final devices = _branchSoftwareDevices[branchIndex]?[software];
+        if (devices == null) return;
+        final count = devices.length + 1;
+        devices.add(_DeviceActivation(deviceLabel: 'Device $count'));
+      });
+    }
+
+    void _removeBranchDevice(int branchIndex, String software, int index) {
+      setState(() {
+        final devices = _branchSoftwareDevices[branchIndex]?[software];
+        if (devices == null || index >= devices.length) return;
+        devices[index].dispose();
+        devices.removeAt(index);
+        if (devices.isEmpty) {
+          _branchSelectedSoftwares[branchIndex]?.remove(software);
+          _branchSoftwareDevices[branchIndex]?.remove(software);
+        }
+      });
+    }
+
+    Future<void> _pickBranchActivationDate(
+        int branchIndex, String software, int deviceIndex,
+        {required bool isExpiry}) async {
+      final devices = _branchSoftwareDevices[branchIndex]?[software];
+      if (devices == null || deviceIndex >= devices.length) return;
+      
+      final device = devices[deviceIndex];
+      final initial = isExpiry ? device.expiryDate : device.activationDate;
+      
+      final picked = await _pickDateTime(initial ?? DateTime.now());
+      if (picked != null) {
+        setState(() {
+          if (isExpiry) {
+            device.expiryDate = picked;
+          } else {
+            device.activationDate = picked;
+          }
+        });
+      }
+    }
+
+  Future<DateTime?> _pickDateTime(DateTime initialDateTime) async {
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initialDateTime,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+
+    if (pickedDate == null) return null;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initialDateTime),
+    );
+
+    if (pickedTime == null) return null;
+
+    return DateTime(
+      pickedDate.year,
+      pickedDate.month,
+      pickedDate.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+  }
+
+  Future<void> _pickFinancialDate({required bool isStartDate}) async {
+    final initialDate = (isStartDate ? _financialPeriodStartDate : _financialPeriodEndDate) ?? DateTime.now();
+    final pickedDateTime = await _pickDateTime(initialDate);
+
+    if (pickedDateTime != null) {
+      setState(() {
+        if (isStartDate) {
+          _financialPeriodStartDate = pickedDateTime;
+        } else {
+          _financialPeriodEndDate = pickedDateTime;
+        }
+      });
+    }
+  }
+
+  Future<void> _pickActivationDate(
+    String software,
+    int deviceIndex, {
+    required bool isExpiry,
+  }) async {
+    final devices = _softwareDevices[software];
+    if (devices == null || deviceIndex >= devices.length) return;
+
+    final device = devices[deviceIndex];
+    final initial = isExpiry
+        ? device.expiryDate ?? DateTime.now()
+        : device.activationDate ?? DateTime.now();
+
+    final picked = await _pickDateTime(initial);
+    if (picked != null) {
+      setState(() {
+        if (isExpiry) {
+          device.expiryDate = picked;
+        } else {
+          device.activationDate = picked;
+        }
+        _checkExpiryAlerts();
+      });
+    }
+  }
+
+  Widget _buildDatePickerField({
+    required String label,
+    required DateTime? selectedDate,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.calendar_today, size: 18, color: Colors.teal),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    selectedDate == null
+                        ? label
+                        : DateFormat('yyyy-MM-dd HH:mm').format(selectedDate),
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Fetch period sections from Firestore ──────────────────────────────────
+  Future<void> _fetchPeriods() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('period_sections')
+          .orderBy('name')
+          .get();
+      if (mounted) {
+        _periods = snap.docs.map((doc) {
+          final data = doc.data();
+          return _Period(
+            id: doc.id,
+            name: data['name'] ?? 'Unnamed',
+            startDate: (data['startDate'] as Timestamp).toDate(),
+            endDate: (data['endDate'] as Timestamp).toDate(),
+          );
+        }).toList();
+
+        // If edit mode and period already set, match the object
+        if (_isEditing && widget.customer?.periodSectionId != null) {
+          _matchPeriod(widget.customer!.periodSectionId!);
+        }
+
+        setState(() => _periodsLoading = false);
+      }
+    } catch (e) {
+      setState(() => _periodsLoading = false);
+    }
+  }
+
+  void _matchPeriod(String periodId) {
+    try {
+      final match = _periods.firstWhere((p) => p.id == periodId);
+      setState(() => _selectedPeriod = match);
+    } catch (e) {
+      // Period not found, leave as null
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _phoneController.dispose();
+    _phone2Controller.dispose();
+    _emailController.dispose();
+    _organizationNameController.dispose();
+    _organizationUnitNameController.dispose();
+    _commonNameController.dispose();
+    _businessCategoryController.dispose();
+    _addressController.dispose();
+    _registeredAddressController.dispose();
+    _buildingNoController.dispose();
+    _streetNameController.dispose();
+    _districtNameController.dispose();
+    _cityNameController.dispose();
+    _zipCodeController.dispose();
+    _additionalNoController.dispose();
+    _unitNoController.dispose();
+    _countryController.dispose();
+    _taxNumberController.dispose();
+    _crNumberController.dispose();
+    _zatcaUsernameController.dispose();
+    _zatcaPasswordController.dispose();
+
+    for (final devices in _softwareDevices.values) {
+      for (final d in devices) {
+        d.dispose();
+      }
+    }
+
+    for (final staff in _mainCustomerStaff) {
+      staff.dispose();
+    }
+
+    for (final branch in _branches) {
+      branch.dispose();
+    }
+
+    for (final branchDevices in _branchSoftwareDevices.values) {
+      for (final devices in branchDevices.values) {
+        for (final d in devices) {
+          d.dispose();
+        }
+      }
+    }
+
+    super.dispose();
+  }
+
+  void _saveCustomer() async {
+    // Prevent double-tap submission
+    final provider = Provider.of<CustomerProvider>(context, listen: false);
+    if (provider.isLoading) return;
+
+    if (_formKey.currentState!.validate()) {
+
+      bool success;
+      String successMessage;
+
+      if (_isEditing) {
+        // Update existing customer
+        success = await provider.updateCustomer(
+          id: widget.customer!.id,
+          name: _nameController.text.trim(),
+          phone: _phoneController.text.trim(),
+          phone2: _phone2Controller.text.trim().isEmpty ? null : _phone2Controller.text.trim(),
+          email: _emailController.text.trim().isEmpty ? null : _emailController.text.trim(),
+          organizationName: _organizationNameController.text.trim().isEmpty ? null : _organizationNameController.text.trim(),
+          organizationUnitName: _organizationUnitNameController.text.trim().isEmpty ? null : _organizationUnitNameController.text.trim(),
+          commonName: _commonNameController.text.trim().isEmpty ? null : _commonNameController.text.trim(),
+          businessCategory: _businessCategoryController.text.trim().isEmpty ? null : _businessCategoryController.text.trim(),
+          address: _addressController.text.trim(),
+          registeredAddress: _registeredAddressController.text.trim().isEmpty ? null : _registeredAddressController.text.trim(),
+          buildingNo: _buildingNoController.text.trim().isEmpty ? null : _buildingNoController.text.trim(),
+          streetName: _streetNameController.text.trim().isEmpty ? null : _streetNameController.text.trim(),
+          districtName: _districtNameController.text.trim().isEmpty ? null : _districtNameController.text.trim(),
+          cityName: _cityNameController.text.trim().isEmpty ? null : _cityNameController.text.trim(),
+          zipCode: _zipCodeController.text.trim().isEmpty ? null : _zipCodeController.text.trim(),
+          additionalNo: _additionalNoController.text.trim().isEmpty ? null : _additionalNoController.text.trim(),
+          unitNo: _unitNoController.text.trim().isEmpty ? null : _unitNoController.text.trim(),
+          country: _countryController.text.trim().isEmpty ? null : _countryController.text.trim(),
+          taxNumber: _taxNumberController.text.trim(),
+          zatcaEnabled: _zatcaEnabled,
+          crNumber: _crNumberController.text.trim().isEmpty ? null : _crNumberController.text.trim(),
+          zatcaUsername: _zatcaUsernameController.text.trim().isEmpty ? null : _zatcaUsernameController.text.trim(),
+          zatcaPassword: _zatcaPasswordController.text.trim().isEmpty ? null : _zatcaPasswordController.text.trim(),
+          financialPeriodStartDate: _financialPeriodStartDate?.toIso8601String(),
+          financialPeriodEndDate: _financialPeriodEndDate?.toIso8601String(),
+          usedSoftwares: _selectedSoftwareNames,
+          softwareActivations: _buildSoftwareActivations(),
+          periodSectionId: _selectedPeriod?.id,
+          periodSectionName: _selectedPeriod?.name,
+          staff: _mainCustomerStaff.map((s) => Staff(
+            name: s.nameController.text.trim(),
+            phone: s.phoneController.text.trim(),
+          )).toList(),
+          branches: List.generate(_branches.length, (index) {
+            final branchData = _branches[index];
+            return Branch(
+              name: branchData.nameController.text.trim(),
+              phone: branchData.phoneController.text.trim(),
+              address: branchData.addressController.text.trim(),
+              staff: branchData.staffList.map((s) => Staff(
+                name: s.nameController.text.trim(),
+                phone: s.phoneController.text.trim(),
+              )).toList(),
+              usedSoftwares: _branchSelectedSoftwares[index] ?? [],
+              softwareActivations: _buildBranchSoftwareActivations(index),
+            );
+          }).toList(),
+        );
+        successMessage = 'Customer updated successfully!';
+      } else {
+        // Add new customer
+        success = await provider.addCustomer(
+          name: _nameController.text.trim(),
+          phone: _phoneController.text.trim(),
+          phone2: _phone2Controller.text.trim().isEmpty ? null : _phone2Controller.text.trim(),
+          email: _emailController.text.trim().isEmpty ? null : _emailController.text.trim(),
+          organizationName: _organizationNameController.text.trim().isEmpty ? null : _organizationNameController.text.trim(),
+          organizationUnitName: _organizationUnitNameController.text.trim().isEmpty ? null : _organizationUnitNameController.text.trim(),
+          commonName: _commonNameController.text.trim().isEmpty ? null : _commonNameController.text.trim(),
+          businessCategory: _businessCategoryController.text.trim().isEmpty ? null : _businessCategoryController.text.trim(),
+          address: _addressController.text.trim(),
+          registeredAddress: _registeredAddressController.text.trim().isEmpty ? null : _registeredAddressController.text.trim(),
+          buildingNo: _buildingNoController.text.trim().isEmpty ? null : _buildingNoController.text.trim(),
+          streetName: _streetNameController.text.trim().isEmpty ? null : _streetNameController.text.trim(),
+          districtName: _districtNameController.text.trim().isEmpty ? null : _districtNameController.text.trim(),
+          cityName: _cityNameController.text.trim().isEmpty ? null : _cityNameController.text.trim(),
+          zipCode: _zipCodeController.text.trim().isEmpty ? null : _zipCodeController.text.trim(),
+          additionalNo: _additionalNoController.text.trim().isEmpty ? null : _additionalNoController.text.trim(),
+          unitNo: _unitNoController.text.trim().isEmpty ? null : _unitNoController.text.trim(),
+          country: _countryController.text.trim().isEmpty ? null : _countryController.text.trim(),
+          taxNumber: _taxNumberController.text.trim(),
+          zatcaEnabled: _zatcaEnabled,
+          crNumber: _crNumberController.text.trim().isEmpty ? null : _crNumberController.text.trim(),
+          zatcaUsername: _zatcaUsernameController.text.trim().isEmpty ? null : _zatcaUsernameController.text.trim(),
+          zatcaPassword: _zatcaPasswordController.text.trim().isEmpty ? null : _zatcaPasswordController.text.trim(),
+          financialPeriodStartDate: _financialPeriodStartDate?.toIso8601String(),
+          financialPeriodEndDate: _financialPeriodEndDate?.toIso8601String(),
+          usedSoftwares: _selectedSoftwareNames,
+          softwareActivations: _buildSoftwareActivations(),
+          periodSectionId: _selectedPeriod?.id,
+          periodSectionName: _selectedPeriod?.name,
+          staff: _mainCustomerStaff.map((s) => Staff(
+            name: s.nameController.text.trim(),
+            phone: s.phoneController.text.trim(),
+          )).toList(),
+          branches: List.generate(_branches.length, (index) {
+            final branchData = _branches[index];
+            return Branch(
+              name: branchData.nameController.text.trim(),
+              phone: branchData.phoneController.text.trim(),
+              address: branchData.addressController.text.trim(),
+              staff: branchData.staffList.map((s) => Staff(
+                name: s.nameController.text.trim(),
+                phone: s.phoneController.text.trim(),
+              )).toList(),
+              usedSoftwares: _branchSelectedSoftwares[index] ?? [],
+              softwareActivations: _buildBranchSoftwareActivations(index),
+            );
+          }).toList(),
+        );
+        successMessage = 'Customer saved successfully!';
+      }
+
+      if (success) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(successMessage),
+              backgroundColor: Colors.green,
+            ),
+          );
+           Navigator.pop(context);
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(provider.errorMessage ?? 'Failed to save customer'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Widget _buildTextField({
+  required TextEditingController controller,
+  required String label,
+  IconData? icon,
+  TextInputType keyboardType = TextInputType.text,
+  int maxLines = 1,
+  bool required = false,
+}) {
+  const lightGrey = Color(0xFFDDDDDD); // light grey border
+  const red = Colors.red;
+
+  OutlineInputBorder greyBorder =  OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+    borderSide: BorderSide(color: lightGrey, width: 1,),
+  );
+
+  OutlineInputBorder redBorder =  OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+    borderSide: BorderSide(color: red, width: 1),
+  );
+
+  return TextFormField(
+    controller: controller,
+    keyboardType: keyboardType,
+    maxLines: maxLines,
+    decoration: InputDecoration(
+      filled: true,
+      fillColor: Colors.white,
+      labelText: label,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+
+      // 🔹 Normal border
+      enabledBorder: greyBorder,
+
+      // 🔹 Focused border
+      focusedBorder: greyBorder,
+
+      // 🔹 Disabled border
+      disabledBorder: greyBorder,
+
+      // 🔹 Error border (when validation fails)
+      errorBorder: redBorder,
+
+      // 🔹 Focused error border
+      focusedErrorBorder: redBorder,
+
+      // prefixIcon: icon != null ? Icon(icon) : null,
+    ),
+    validator: required
+        ? (value) => value == null || value.trim().isEmpty
+            ? 'Please enter $label'
+            : null
+        : null,
+  );
+}
+
+
+  @override
+  Widget build(BuildContext context) {
+    final provider=Provider.of<CustomerProvider>(context,listen: false);
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F7FB),
+      body: Form(
+        key: _formKey,
+        child: Column(
+          children: [
+            AppBar(
+              toolbarHeight: 72,
+              scrolledUnderElevation: 0,
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              elevation: 0,
+              leading: GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: Container(
+                  margin: const EdgeInsets.only(left: 12, top: 12, bottom: 12),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.shade200),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.04),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(LucideIcons.x, size: 20, color: Colors.black87),
+                ),
+              ),
+              actions: [
+                GestureDetector(
+                  onTap: provider.isLoading ? null : _saveCustomer,
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 12, top: 12, bottom: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.teal,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.teal.withValues(alpha: 0.22),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(LucideIcons.save, size: 18, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text(
+                          'Save',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              centerTitle: true,
+              title: Text(
+                _isEditing ? 'Edit Customer' : 'Create New Customer',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [ 
+                                  const Text(
+                                    'Period Section (Optional)',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                    //                    const SizedBox(height: 6),
+                                    if (_periodsLoading)
+                      const Center(child: CircularProgressIndicator())
+                                    else if (_periods.isEmpty)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Text(
+                          'No periods available',
+                          style: TextStyle(color: Colors.grey, fontSize: 14),
+                        ),
+                      )
+                                    else
+                      _PeriodPicker(
+                        periods: _periods,
+                        selected: _selectedPeriod,
+                        onSelected: (p) => setState(() => _selectedPeriod = p),
+                      ),
+                                  // ── Basic Information ──────────────────────────────────────
+                                  const SizedBox(height: 6),
+                                  const Text(
+                                    'Basic Information',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 6),
+                            
+                                  Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration( borderRadius: BorderRadius.circular(10),color: Colors.white),
+                                    child: Column(
+                                      children: [      _buildTextField(
+                                    controller: _nameController,
+                                    label: 'Customer Name',
+                                    icon: Icons.person,
+                                    required: true,
+                                  ),
+                                  const SizedBox(height: 12),
+                                        Container(child: Row(children: [ Expanded(
+                                          child: _buildTextField(
+                                            controller: _phoneController,
+                                            label: 'Phone Number 1',
+                                            icon: Icons.phone,
+                                            keyboardType: TextInputType.phone,
+                                            required: true,
+                                          ),
+                                        ), const SizedBox(width: 12),Expanded(
+                                          child: _buildTextField(
+                                            controller: _phone2Controller,
+                                            label: 'Phone Number 2 (Optional)',
+                                            icon: Icons.phone,
+                                            keyboardType: TextInputType.phone,
+                                          ),
+                                        ),],),)
+                                                                         ,
+                                                                         
+                                        
+                                        const SizedBox(height: 12),
+                                        _buildTextField(
+                                          controller: _emailController,
+                                          label: 'Email (Optional)',
+                                          icon: Icons.email,
+                                          keyboardType: TextInputType.emailAddress,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+
+                                  // ── Main Customer Staff ─────────────────────────────────────
+                                  const Text(
+                                    'Main Customer Staff',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      color: Colors.white,
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        ...List.generate(_mainCustomerStaff.length, (staffIndex) {
+                                          final staff = _mainCustomerStaff[staffIndex];
+                                          return Container(
+                                            margin: const EdgeInsets.only(bottom: 12),
+                                            padding: const EdgeInsets.all(12),
+                                            decoration: BoxDecoration(
+                                              color: Colors.grey.shade50,
+                                              borderRadius: BorderRadius.circular(8),
+                                              border: Border.all(color: Colors.grey.shade200),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Expanded(
+                                                  child: Column(
+                                                    children: [
+                                                      TextFormField(
+                                                        controller: staff.nameController,
+                                                        decoration: InputDecoration(
+                                                          isDense: true,
+                                                          contentPadding: const EdgeInsets.symmetric(
+                                                              vertical: 8, horizontal: 10),
+                                                          labelText: 'Staff Name',
+                                                          border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8)),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 8),
+                                                      TextFormField(
+                                                        controller: staff.phoneController,
+                                                        decoration: InputDecoration(
+                                                          isDense: true,
+                                                          contentPadding: const EdgeInsets.symmetric(
+                                                              vertical: 8, horizontal: 10),
+                                                          labelText: 'Phone Number',
+                                                          border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8)),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                if (_mainCustomerStaff.length > 1)
+                                                  IconButton(
+                                                    icon: const Icon(Icons.delete_outline),
+                                                    color: Colors.red.shade400,
+                                                    onPressed: () {
+                                                      setState(() {
+                                                        staff.dispose();
+                                                        _mainCustomerStaff.removeAt(staffIndex);
+                                                      });
+                                                    },
+                                                  ),
+                                              ],
+                                            ),
+                                          );
+                                        }),
+                                        OutlinedButton.icon(
+                                          onPressed: () {
+                                            setState(() {
+                                              _mainCustomerStaff.add(_BranchStaff());
+                                            });
+                                          },
+                                          icon: const Icon(Icons.add, size: 18),
+                                          label: const Text('Add Staff Details'),
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.teal,
+                                            side: const BorderSide(color: Colors.teal),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+
+                                  // ── Organization Details ───────────────────────────────────
+                                  const Text(
+                                    'Organization Details',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 12),
+                                   Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration( borderRadius: BorderRadius.circular(10),color: Colors.white),
+                                   
+                                    child: Column(
+                                      children: [
+                                        _buildTextField(
+                                          controller: _organizationNameController,
+                                          label: 'Organization Name (Optional)',
+                                          icon: Icons.business,
+                                        ),
+                                        const SizedBox(height: 12),
+                                        _buildTextField(
+                                          controller: _organizationUnitNameController,
+                                          label: 'Organization Unit Name (Optional)',
+                                          icon: Icons.domain,
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Container(
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _commonNameController,
+                                                  label: 'Common Name (Optional)',
+                                                  icon: Icons.label,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _businessCategoryController,
+                                                  label: 'Business Category (Optional)',
+                                                  icon: Icons.category,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                    
+                                  // ── Address Information ────────────────────────────────────
+                                  const Text(
+                                    'Address Information',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration( borderRadius: BorderRadius.circular(10),color: Colors.white),
+                                    child: Column(
+                                      children: [
+                                        _buildTextField(
+                                                  controller: _addressController,
+                                                  label: 'Primary Address',
+                                                  icon: Icons.location_on,
+                                                  maxLines: 3,
+                                                  required: true,
+                                                ),
+                                         const SizedBox(height: 12),
+
+                                                 _buildTextField(
+                                                  controller: _registeredAddressController,
+                                                  label: 'Registered Address (Optional)',
+                                                  icon: Icons.location_on_outlined,
+                                                  maxLines: 3,
+                                                ),
+                                        // Container(
+                                        //   child: Row(
+                                        //     children: [
+                                        //       Expanded(
+                                        //         child: _buildTextField(
+                                        //           controller: _addressController,
+                                        //           label: 'Primary Address',
+                                        //           icon: Icons.location_on,
+                                        //           maxLines: 3,
+                                        //           required: true,
+                                        //         ),
+                                        //       ),
+                                        //       const SizedBox(width: 12),
+                                        //       Expanded(
+                                        //         child: _buildTextField(
+                                        //           controller: _registeredAddressController,
+                                        //           label: 'Registered Address (Optional)',
+                                        //           icon: Icons.location_on_outlined,
+                                        //           maxLines: 3,
+                                        //         ),
+                                        //       ),
+                                        //     ],
+                                        //   ),
+                                        // ),
+                                         const SizedBox(height: 12),
+                                        Container(
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _buildingNoController,
+                                                  label: 'Building No (Optional)',
+                                                  icon: Icons.apartment,
+                                                  keyboardType: TextInputType.number,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _additionalNoController,
+                                                  label: 'Additional No (Optional)',
+                                                  icon: Icons.numbers,
+                                                  keyboardType: TextInputType.number,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                                              const SizedBox(height: 12),
+                                        Container(
+                                          child: Row(
+                                            children: [
+                                              
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _streetNameController,
+                                                  label: 'Street Name (Optional)',
+                                                  icon: Icons.streetview,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _districtNameController,
+                                                  label: 'District Name (Optional)',
+                                                  icon: Icons.map,
+                                                ),
+                                              ),
+                                              
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(height: 12),
+                                         
+                                        Container(
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _cityNameController,
+                                                  label: 'City Name (Optional)',
+                                                  icon: Icons.location_city,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _countryController,
+                                                  label: 'Country (Optional)',
+                                                  icon: Icons.public,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                                                         
+                                          
+                                                                         
+                                        const SizedBox(height: 12),
+                                        Container(
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _unitNoController,
+                                                  label: 'Unit No (Optional)',
+                                                  icon: Icons.home,
+                                                  keyboardType: TextInputType.number,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: _buildTextField(
+                                                  controller: _zipCodeController,
+                                                  label: 'Zip Code (Optional)',
+                                                  icon: Icons.mail,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                    
+                                  // ── Tax & Registration ─────────────────────────────────────
+                                  // const Text(
+                                  //   'Tax & Registration',
+                                  //   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  // ),
+                                  // const SizedBox(height: 6),
+                            
+                                  
+                                  // const SizedBox(height: 20),
+                                    
+                                  // ── Period Section ────────────────────────────────────────
+                                 
+                                  // const SizedBox(height: 20),
+                                ],
+                              ),
+                            ),
+                          ),
+                          // SafeArea(
+                          //   child: Consumer<CustomerProvider>(
+                          //     builder: (context, provider, child) {
+                          //       return SizedBox(
+                          //         width: double.infinity,
+                          //         height: 50,
+                          //         child: Row(
+                          //           children: [
+                          //             // Expanded(
+                          //             //   child: InkWell(
+                          //             //     onTap: () {
+                          //             //       // Navigator.of(context).pop();
+                          //             //     },
+                          //             //     child: Container(
+                          //             //       height: 50,
+                          //             //       decoration: BoxDecoration(
+                          //             //         border: Border.all(color: Colors.grey.shade300),
+                          //             //         boxShadow: [
+                          //             //           BoxShadow(
+                          //             //             color: Colors.grey.withOpacity(0.1),
+                          //             //             spreadRadius: 2,
+                          //             //             blurRadius: 5,
+                          //             //             offset: const Offset(0, 0),
+                          //             //           ),
+                          //             //         ],
+                          //             //         color: Colors.white,
+                          //             //         borderRadius: BorderRadius.circular(30),
+                          //             //       ),
+                          //             //       child: const Center(
+                          //             //         child: Text(
+                          //             //           'Cancel',
+                          //             //           style: TextStyle(
+                          //             //             color: Colors.black,
+                          //             //             fontSize: 16,
+                          //             //             fontWeight: FontWeight.w500,
+                          //             //           ),
+                          //             //         ),
+                          //             //       ),
+                          //             //     ),
+                          //             //   ),
+                          //             // ),
+                          //             // const SizedBox(width: 16),
+                          //             // Expanded(
+                          //             //   child: GestureDetector(
+                          //             //     onTap: provider.isLoading ? null : _saveCustomer,
+                          //             //     child: Container(
+                          //             //       padding: const EdgeInsets.symmetric(vertical: 14),
+                          //             //       decoration: BoxDecoration(
+                          //             //         color: provider.isLoading ? Colors.teal.shade300 : Colors.teal,
+                          //             //         borderRadius: BorderRadius.circular(30),
+                          //             //         boxShadow: [
+                          //             //           if (!provider.isLoading)
+                          //             //             BoxShadow(
+                          //             //               color: Colors.teal.withOpacity(0.3),
+                          //             //               blurRadius: 8,
+                          //             //               offset: const Offset(0, 3),
+                          //             //             ),
+                          //             //         ],
+                          //             //       ),
+                          //             //       alignment: Alignment.center,
+                          //             //       child: provider.isLoading
+                          //             //           ? const SizedBox(
+                          //             //         height: 22,
+                          //             //         width: 22,
+                          //             //         child: CircularProgressIndicator(
+                          //             //           strokeWidth: 2.5,
+                          //             //           valueColor:
+                          //             //           AlwaysStoppedAnimation<Color>(Colors.white),
+                          //             //         ),
+                          //             //       )
+                          //             //           : Text(
+                          //             //         _isEditing ? 'Update Customer' : 'Save Customer',
+                          //             //         style: const TextStyle(
+                          //             //           color: Colors.white,
+                          //             //           fontSize: 18,
+                          //             //           fontWeight: FontWeight.w600,
+                          //             //         ),
+                          //             //       ),
+                          //             //     ),
+                          //             //   ),
+                          //             // ),
+                          //           ],
+                          //         ),
+                          //       );
+                          //     },
+                          //   ),
+                          // ),
+                        ],
+                      ),
+                    ),
+                 SizedBox(width: 12),
+                 Expanded(child: Column(
+                   children: [
+                     Expanded(child: SingleChildScrollView(
+                       child: Column(
+                         crossAxisAlignment: CrossAxisAlignment.start,
+                         children: [
+                          //  const SizedBox(height: 12),
+                           const Text(
+                             'Tax & Registration',
+                             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                           ),
+                           const SizedBox(height: 12),
+                           Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration( borderRadius: BorderRadius.circular(10),color: Colors.white),
+                             child: Column(
+                               children: [
+                                 _buildTextField(
+                                   controller: _taxNumberController,
+                                   label: 'Tax Number',
+                                   icon: Icons.confirmation_number,
+                                 ),
+                                 const SizedBox(height: 12),
+                                 _buildTextField(
+                                   controller: _crNumberController,
+                                   label: 'CR Number (Optional)',
+                                   icon: Icons.business_center,
+                                 ),
+                               
+                               ],
+                             ),
+                           ),
+                           const SizedBox(height: 12),
+                           const Text(
+                             'Zatca Credentials (Optional)',
+                             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                           ),
+                           const SizedBox(height: 12),
+                           Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration( borderRadius: BorderRadius.circular(10),color: Colors.white),
+                             child: Column(
+                               children: [
+                                
+                                 _buildTextField(
+                                   controller: _zatcaUsernameController,
+                                   label: 'ZATCA Username (Optional)',
+                                   icon: Icons.person_outline,
+                                 ),
+                                 const SizedBox(height: 12),
+                                 _buildTextField(
+                                   controller: _zatcaPasswordController,
+                                   label: 'ZATCA Password (Optional)',
+                                   icon: Icons.lock_outline,
+                                   keyboardType: TextInputType.visiblePassword,
+                                 ),
+                               ],
+                             ),
+                           ),
+                            const SizedBox(height: 12),
+                            // const SizedBox(height: 16),
+                      Card(
+                        elevation: 0,
+                        color: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: Colors.grey.shade200),
+                        ),
+                        child: SwitchListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          activeThumbColor: Colors.teal,
+                          title: const Text('Enable ZATCA Integration'),
+                          // subtitle: const Text('Turn this on to use ZATCA credentials and settings.'),
+                          value: _zatcaEnabled,
+                          onChanged: (value) {
+                            setState(() => _zatcaEnabled = value);
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // ── Financial Period ───────────────────────────────────────
+                      const Text(
+                        'Financial Period',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildDatePickerField(
+                              label: 'Select Start Date & Time',
+                              selectedDate: _financialPeriodStartDate,
+                              onTap: () => _pickFinancialDate(isStartDate: true),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildDatePickerField(
+                              label: 'Select End Date & Time',
+                              selectedDate: _financialPeriodEndDate,
+                              onTap: () => _pickFinancialDate(isStartDate: false),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+
+                      // ── Software Selection ─────────────────────────────────────
+                      const Text(
+                        'Select Software',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 12),
+                      Card(
+                        elevation: 0,
+                        color: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: Colors.grey.shade200),
+                        ),
+                        child: Column(
+                          children: _availableSoftwares.map((software) {
+                            final selected = _selectedSoftwareNames.contains(software);
+                            final devices = _softwareDevices[software] ?? [];
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                CheckboxListTile(
+                                  dense: true,
+                                  activeColor: Colors.teal,
+                                  title: Text(software),
+                                  value: selected,
+                                  onChanged: (v) => _toggleSoftwareSelection(software, v),
+                                ),
+
+                                if (selected) ...[
+                                  ...List.generate(devices.length, (index) {
+                                    final device = devices[index];
+                                    return Container(
+                                      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade50,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: Colors.grey.shade200),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  'Device ${index + 1}',
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                              ),
+                                              if (devices.length > 1)
+                                                IconButton(
+                                                  icon: const Icon(Icons.delete_outline, size: 20),
+                                                  color: Colors.red.shade400,
+                                                  onPressed: () => _removeDevice(software, index),
+                                                  tooltip: 'Remove device',
+                                                ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 8),
+                                          TextFormField(
+                                            controller: device.deviceLabelController,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(
+                                                  vertical: 8, horizontal: 10),
+                                              labelText: 'Device Label (e.g. Server, Node 1)',
+                                              border: OutlineInputBorder(
+                                                  borderRadius: BorderRadius.circular(8)),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          TextFormField(
+                                            controller: device.userController,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(
+                                                  vertical: 8, horizontal: 10),
+                                              labelText: 'Activation User ID',
+                                              border: OutlineInputBorder(
+                                                  borderRadius: BorderRadius.circular(8)),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          TextFormField(
+                                            controller: device.keyController,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              contentPadding: const EdgeInsets.symmetric(
+                                                  vertical: 8, horizontal: 10),
+                                              labelText: 'Activation Key',
+                                              border: OutlineInputBorder(
+                                                  borderRadius: BorderRadius.circular(8)),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          _buildDatePickerField(
+                                            label: 'Activation Date & Time',
+                                            selectedDate: device.activationDate,
+                                            onTap: () => _pickActivationDate(
+                                                software, index,
+                                                isExpiry: false),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          _buildDatePickerField(
+                                            label: 'Expiry Date & Time',
+                                            selectedDate: device.expiryDate,
+                                            onTap: () => _pickActivationDate(
+                                                software, index,
+                                                isExpiry: true),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+
+                                  // Add Device button
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                    child: OutlinedButton.icon(
+                                      onPressed: () => _addDevice(software),
+                                      icon: const Icon(Icons.add, size: 18),
+                                      label: const Text('Add Device'),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: Colors.teal,
+                                        side: const BorderSide(color: Colors.teal),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      if (_selectedSoftwareNames.isNotEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Software activation map',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              const SizedBox(height: 8),
+                              ..._buildSoftwareActivations().map((entry) {
+                                final label = entry['deviceLabel']?.toString().isNotEmpty == true
+                                    ? entry['deviceLabel']
+                                    : 'Device';
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 6),
+                                  child: Text(
+                                    '• ${entry['name']} ($label)\n'
+                                    '   User: ${entry['activationUserId']}\n'
+                                    '   Key: ${entry['activationKey']}'
+                                    '${entry['activationDate'] != null ? '\n   Activation: ${entry['activationDate']}' : ''}'
+                                    '${entry['expiryDate'] != null ? '\n   Expiry: ${entry['expiryDate']}' : ''}',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                );
+                              }),
+                            ],
+                          ),
+                        ),
+                         ],
+                       ),
+                     )),
+
+                      const SizedBox(height: 20),
+
+                      // ── Branches & Staff ─────────────────────────────────────
+                      const Text(
+                        'Branches & Staff',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Display existing branches
+                      ...List.generate(_branches.length, (branchIndex) {
+                        final branch = _branches[branchIndex];
+                        return Column(
+                          children: [
+                            Card(
+                              elevation: 0,
+                              color: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                side: BorderSide(color: Colors.grey.shade200),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            'Branch ${branchIndex + 1}',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                        ),
+                                        if (_branches.length > 1)
+                                          IconButton(
+                                            icon: const Icon(Icons.delete_outline, size: 20),
+                                            color: Colors.red.shade400,
+                                            onPressed: () {
+                                              setState(() {
+                                                _branches[branchIndex].dispose();
+                                                _branches.removeAt(branchIndex);
+                                              });
+                                            },
+                                            tooltip: 'Remove branch',
+                                          ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+
+                                    // Branch Name
+                                    TextFormField(
+                                      controller: branch.nameController,
+                                      decoration: InputDecoration(
+                                        isDense: true,
+                                        contentPadding: const EdgeInsets.symmetric(
+                                            vertical: 8, horizontal: 10),
+                                        labelText: 'Branch Name',
+                                        border: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(8)),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+
+                                    // Branch Phone
+                                    TextFormField(
+                                      controller: branch.phoneController,
+                                      decoration: InputDecoration(
+                                        isDense: true,
+                                        contentPadding: const EdgeInsets.symmetric(
+                                            vertical: 8, horizontal: 10),
+                                        labelText: 'Branch Phone',
+                                        border: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(8)),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+
+                                    // Branch Address
+                                    TextFormField(
+                                      controller: branch.addressController,
+                                      maxLines: 2,
+                                      decoration: InputDecoration(
+                                        isDense: true,
+                                        contentPadding: const EdgeInsets.symmetric(
+                                            vertical: 8, horizontal: 10),
+                                        labelText: 'Branch Address',
+                                        border: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(8)),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+
+                                    // Branch Software Section
+                                    const Text(
+                                      'Branch software details',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Card(
+                                      elevation: 0,
+                                      color: Colors.grey.shade50,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                        side: BorderSide(color: Colors.grey.shade200),
+                                      ),
+                                      child: Column(
+                                        children: _availableSoftwares.map((software) {
+                                          final selected = (_branchSelectedSoftwares[branchIndex] ?? []).contains(software);
+                                          final devices = _branchSoftwareDevices[branchIndex]?[software] ?? [];
+
+                                          return Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              CheckboxListTile(
+                                                dense: true,
+                                                activeColor: Colors.teal,
+                                                title: Text(software),
+                                                value: selected,
+                                                onChanged: (v) => _toggleBranchSoftwareSelection(branchIndex, software, v),
+                                              ),
+                                              if (selected) ...[
+                                                ...List.generate(devices.length, (deviceIndex) {
+                                                  final device = devices[deviceIndex];
+                                                  return Container(
+                                                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                                    padding: const EdgeInsets.all(12),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.white,
+                                                      borderRadius: BorderRadius.circular(8),
+                                                      border: Border.all(color: Colors.grey.shade200),
+                                                    ),
+                                                    child: Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: Text(
+                                                                'Device ${deviceIndex + 1}',
+                                                                style: const TextStyle(
+                                                                  fontWeight: FontWeight.w600,
+                                                                  fontSize: 13,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                            if (devices.length > 1)
+                                                              IconButton(
+                                                                icon: const Icon(Icons.delete_outline, size: 18),
+                                                                color: Colors.red.shade400,
+                                                                onPressed: () => _removeBranchDevice(branchIndex, software, deviceIndex),
+                                                              ),
+                                                          ],
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        TextFormField(
+                                                          controller: device.deviceLabelController,
+                                                          decoration: InputDecoration(
+                                                            isDense: true,
+                                                            contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+                                                            labelText: 'Device Label',
+                                                            border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        TextFormField(
+                                                          controller: device.userController,
+                                                          decoration: InputDecoration(
+                                                            isDense: true,
+                                                            contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+                                                            labelText: 'Activation User ID',
+                                                            border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        TextFormField(
+                                                          controller: device.keyController,
+                                                          decoration: InputDecoration(
+                                                            isDense: true,
+                                                            contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+                                                            labelText: 'Activation Key',
+                                                            border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        _buildDatePickerField(
+                                                          label: 'Activation Date & Time',
+                                                          selectedDate: device.activationDate,
+                                                          onTap: () => _pickBranchActivationDate(branchIndex, software, deviceIndex, isExpiry: false),
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        _buildDatePickerField(
+                                                          label: 'Expiry Date & Time',
+                                                          selectedDate: device.expiryDate,
+                                                          onTap: () => _pickBranchActivationDate(branchIndex, software, deviceIndex, isExpiry: true),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                }),
+                                                Padding(
+                                                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: () => _addBranchDevice(branchIndex, software),
+                                                    icon: const Icon(Icons.add, size: 18),
+                                                    label: const Text('Add Device'),
+                                                    style: OutlinedButton.styleFrom(
+                                                      foregroundColor: Colors.teal,
+                                                      side: const BorderSide(color: Colors.teal),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          );
+                                        }).toList(),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+
+                                    // Staff Section
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        const Text(
+                                          'Staff Members',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        OutlinedButton.icon(
+                                          onPressed: () {
+                                            setState(() {
+                                              branch.staffList.add(_BranchStaff());
+                                            });
+                                          },
+                                          icon: const Icon(Icons.add, size: 16),
+                                          label: const Text('Add Staff'),
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.teal,
+                                            side: const BorderSide(color: Colors.teal),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+
+                                    // Staff List
+                                    ...List.generate(branch.staffList.length, (staffIndex) {
+                                      final staff = branch.staffList[staffIndex];
+                                      return Container(
+                                        margin: const EdgeInsets.only(bottom: 12),
+                                        padding: const EdgeInsets.all(12),
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade50,
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(color: Colors.grey.shade200),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Column(
+                                                children: [
+                                                  TextFormField(
+                                                    controller: staff.nameController,
+                                                    decoration: InputDecoration(
+                                                      isDense: true,
+                                                      contentPadding:
+                                                          const EdgeInsets.symmetric(
+                                                              vertical: 6, horizontal: 8),
+                                                      labelText: 'Staff Name',
+                                                      border: OutlineInputBorder(
+                                                          borderRadius:
+                                                              BorderRadius.circular(6)),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 6),
+                                                  TextFormField(
+                                                    controller: staff.phoneController,
+                                                    decoration: InputDecoration(
+                                                      isDense: true,
+                                                      contentPadding:
+                                                          const EdgeInsets.symmetric(
+                                                              vertical: 6, horizontal: 8),
+                                                      labelText: 'Phone Number',
+                                                      border: OutlineInputBorder(
+                                                          borderRadius:
+                                                              BorderRadius.circular(6)),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            if (branch.staffList.length > 1)
+                                              IconButton(
+                                                icon: const Icon(Icons.close, size: 18),
+                                                color: Colors.red.shade400,
+                                                onPressed: () {
+                                                  setState(() {
+                                                    staff.dispose();
+                                                    branch.staffList.removeAt(staffIndex);
+                                                  });
+                                                },
+                                                tooltip: 'Remove staff',
+                                              ),
+                                          ],
+                                        ),
+                                      );
+                                    }),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                        );
+                      }),
+
+                      // Add Branch Button
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _branches.add(_BranchData(
+                              staffList: [_BranchStaff()],
+                            ));
+                          });
+                        },
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('Add Branch'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.teal,
+                          side: const BorderSide(color: Colors.teal),
+                        ),
+                      ),
+
+                      const SizedBox(height: 20),
+                   ],
+                 ))
+                 
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}class _PeriodPicker extends StatefulWidget {
+  const _PeriodPicker({
+    required this.periods,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final List<_Period> periods;
+  final _Period? selected;
+  final ValueChanged<_Period?> onSelected; // ← nullable
+
+  @override
+  State<_PeriodPicker> createState() => _PeriodPickerState();
+}
+
+class _PeriodPickerState extends State<_PeriodPicker>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 250),
+  );
+  late final Animation<double> _expandAnim =
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  late final Animation<double> _rotateAnim =
+      Tween<double>(begin: 0, end: 0.5).animate(_expandAnim);
+
+  bool _open = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _toggle() {
+    setState(() => _open = !_open);
+    _open ? _ctrl.forward() : _ctrl.reverse();
+  }
+
+  void _select(_Period? p) {
+    widget.onSelected(p);
+    setState(() => _open = false);
+    _ctrl.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF4F8EF7);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── Trigger ───────────────────────────────────────────────────────
+        GestureDetector(
+          onTap: _toggle,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: _open ? accent : Colors.grey.shade400,
+                width: _open ? 1.5 : 1,
+              ),
+              borderRadius: BorderRadius.circular(8),
+              color: Colors.white,
+            ),
+            child: Row(children: [
+              const Icon(Icons.calendar_today, size: 18, color: Colors.grey),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  widget.selected?.name ?? 'Select Period',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: widget.selected != null
+                        ? Colors.black87
+                        : Colors.grey.shade500,
+                  ),
+                ),
+              ),
+              // ── Clear "x" button when something is selected ────────────
+              if (widget.selected != null)
+                GestureDetector(
+                  onTap: () => _select(null),
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Icon(Icons.close_rounded,
+                        size: 18, color: Colors.grey.shade500),
+                  ),
+                ),
+              RotationTransition(
+                turns: _rotateAnim,
+                child: Icon(Icons.keyboard_arrow_down_rounded,
+                    color: Colors.grey.shade500),
+              ),
+            ]),
+          ),
+        ),
+
+        // ── Expanded list ─────────────────────────────────────────────────
+        SizeTransition(
+          sizeFactor: _expandAnim,
+          axisAlignment: -1,
+          child: Container(
+            margin: const EdgeInsets.only(top: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: Colors.grey.shade300),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: ListView.separated(
+                padding: EdgeInsets.zero,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                // +1 for the "Clear selection" row at the top
+                itemCount: widget.periods.length + 1,
+                separatorBuilder: (_, __) =>
+                    Divider(height: 1, color: Colors.grey.shade100),
+                itemBuilder: (_, i) {
+                  // ── Clear row ──────────────────────────────────────────
+                  if (i == 0) {
+                    return InkWell(
+                      onTap: () => _select(null),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        child: Row(children: [
+                          Icon(Icons.remove_circle_outline,
+                              size: 16, color: Colors.grey.shade400),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Clear selection',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey.shade500,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ]),
+                      ),
+                    );
+                  }
+
+                  // ── Period rows ────────────────────────────────────────
+                  final p = widget.periods[i - 1];
+                  final isSelected = p == widget.selected;
+                  return InkWell(
+                    onTap: () => _select(p),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      color: isSelected
+                          ? accent.withValues(alpha: 0.07)
+                          : Colors.transparent,
+                      child: Row(children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(p.name,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: isSelected
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                    color:
+                                        isSelected ? accent : Colors.black87,
+                                  )),
+                              Text(p.range,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade500,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        if (isSelected)
+                          const Icon(Icons.check_rounded,
+                              size: 18, color: accent),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+
+        // ── Selected badge ────────────────────────────────────────────────
+        if (widget.selected != null) ...[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: accent.withValues(alpha: 0.3)),
+            ),
+            child: Row(children: [
+              const Icon(Icons.check_circle_outline, size: 14, color: accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '${widget.selected!.name}  ·  ${widget.selected!.range}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: accent,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ],
+      ],
+    );
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flutter App",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "args": [
+        "--dart-define=GROQ_API_KEY=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"
+      ]
+    }
+  ]
+}
