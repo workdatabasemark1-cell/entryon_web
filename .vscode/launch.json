@@ -7,7 +7,7 @@
       "request": "launch",
       "program": "lib/main.dart",
       "args": [
-        "--dart-define=GROQ_API_KEY=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"
+        ""
       ]
     }
   ]
